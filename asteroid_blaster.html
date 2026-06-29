@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Asteroid Blaster</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; background: #080816; overflow: hidden; font-family: monospace; color: #fff; user-select: none; }
+  #app { width: 100vw; height: 100vh; display: flex; flex-direction: column; }
+  #hud { flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; padding: 8px 20px; background: rgba(8,8,22,0.97); border-bottom: 0.5px solid rgba(255,255,255,0.08); gap: 16px; }
+  .stat { font-size: clamp(11px, 1.5vw, 14px); color: rgba(255,255,255,0.45); white-space: nowrap; }
+  .stat span { color: #a78bfa; font-weight: 500; font-size: clamp(12px, 1.8vw, 16px); }
+  .stat span.red { color: #f87171; }
+  #lives-d { display: flex; gap: 4px; align-items: center; }
+  .ld { width: 8px; height: 8px; background: #a78bfa; border-radius: 50%; display: inline-block; }
+  #canvas-wrap { flex: 1; position: relative; overflow: hidden; }
+  #gc { display: block; width: 100%; height: 100%; cursor: none; }
+  #overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(8,8,22,0.88); gap: 14px; z-index: 10; }
+  #overlay h2 { font-size: clamp(20px, 4vw, 34px); font-weight: 500; letter-spacing: 4px; color: #fff; }
+  #overlay p { font-size: clamp(12px, 1.6vw, 14px); color: rgba(255,255,255,0.42); text-align: center; max-width: 340px; line-height: 1.8; }
+  .score-big { font-size: clamp(36px, 6vw, 54px); font-weight: 500; color: #a78bfa; }
+  .wave-label { font-size: clamp(12px, 1.5vw, 14px); color: #f87171; font-weight: 500; }
+  #sbtn { background: transparent; border: 0.5px solid rgba(167,139,250,0.6); color: #a78bfa; padding: 10px 30px; border-radius: 8px; font-size: clamp(13px, 1.6vw, 15px); cursor: pointer; font-family: monospace; letter-spacing: 1px; transition: background 0.15s; }
+  #sbtn:hover { background: rgba(167,139,250,0.1); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div class="stat">score <span id="sv">0</span></div>
+    <div class="stat">level <span id="lv">1</span></div>
+    <div class="stat">wave <span id="wv" class="red">&#8212;</span></div>
+    <div class="stat">enemies <span id="ev" class="red">0</span></div>
+    <div id="lives-d"></div>
+  </div>
+  <div id="canvas-wrap">
+    <canvas id="gc"></canvas>
+    <div id="overlay">
+      <h2>ASTEROID BLASTER</h2>
+      <p>WASD to move &middot; Mouse to aim &middot; Hold click to shoot<br>Destroy all asteroids and enemies to advance!</p>
+      <div class="wave-label">Enemy formations &amp; mouse aiming</div>
+      <button id="sbtn">START GAME</button>
+    </div>
+  </div>
+</div>
+<script>
+const canvas = document.getElementById('gc');
+const ctx = canvas.getContext('2d');
+const EL = id => document.getElementById(id);
+
+let W = 0, H = 0;
+let G = { score:0, level:1, lives:5, running:false, wave:0, frame:0 };
+let ship, bullets, eBullets, asteroids, enemies, particles, keys = {}, animId = null;
+let mx = 0, my = 0;
+let stars = [];
+let waveBanner = { text:'', life:0 };
+
+function resize() {
+  const wrap = EL('canvas-wrap');
+  W = wrap.clientWidth;
+  H = wrap.clientHeight;
+  canvas.width = W;
+  canvas.height = H;
+}
+
+window.addEventListener('resize', () => {
+  resize();
+  mkStars();
+});
+
+function rnd(a, b) { return Math.random() * (b - a) + a; }
+function ri(a, b) { return Math.floor(rnd(a, b + 1)); }
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function wrapVal(v, max) { return ((v % max) + max) % max; }
+
+function updHUD() {
+  EL('sv').textContent = G.score;
+  EL('lv').textContent = G.level;
+  EL('ev').textContent = enemies ? enemies.filter(e => e.alive).length : 0;
+  EL('wv').textContent = G.wave || '—';
+  const ld = EL('lives-d');
+  ld.innerHTML = '';
+  for (let i = 0; i < G.lives; i++) {
+  const heart = document.createElement('span');
+  heart.textContent = '❤️';
+  heart.style.fontSize = '24px';
+  ld.appendChild(heart);
+  }
+}
+
+/* ── Ship ── */
+class Ship {
+  constructor() {
+    this.x = W / 2; this.y = H / 2;
+    this.vx = 0; this.vy = 0;
+    this.angle = 0;
+    this.r = 12; this.inv = 0; this.cd = 0;
+    this.tp = []; this.shooting = false;
+  }
+  update() {
+    const spd = 0.22;
+    let ax = 0, ay = 0;
+    if (keys['a'] || keys['ArrowLeft'] )  ax -= spd;
+    if (keys['d'] || keys['ArrowRight']) ax += spd;
+    if (keys['w'] || keys['ArrowUp'] )    ay -= spd;
+    if (keys['s'] || keys['ArrowDown'])  ay += spd;
+    if (ax !== 0 && ay !== 0) { ax *= 0.707; ay *= 0.707; }
+    const thrusting = ax !== 0 || ay !== 0;
+    this.vx = (this.vx + ax) * 0.96;
+    this.vy = (this.vy + ay) * 0.96;
+    this.x = wrapVal(this.x + this.vx, W);
+    this.y = wrapVal(this.y + this.vy, H);
+    this.angle = Math.atan2(my - this.y, mx - this.x);
+    if (thrusting && Math.random() < 0.4) {
+      const ta = Math.atan2(ay, ax) + Math.PI;
+      this.tp.push({
+        x: this.x + Math.cos(ta) * 14, y: this.y + Math.sin(ta) * 14,
+        vx: Math.cos(ta) * rnd(1, 3) + rnd(-0.6, 0.6),
+        vy: Math.sin(ta) * rnd(1, 3) + rnd(-0.6, 0.6),
+        life: 1, s: rnd(1.5, 3)
+      });
+    }
+    if (this.cd > 0) this.cd--;
+    if (this.shooting && this.cd === 0) {
+      bullets.push({
+        x: this.x + Math.cos(this.angle) * 16,
+        y: this.y + Math.sin(this.angle) * 16,
+        vx: Math.cos(this.angle) * 10,
+        vy: Math.sin(this.angle) * 10,
+        life: 65
+      });
+      this.cd = 9;
+    }
+    this.inv = Math.max(0, this.inv - 1);
+    this.tp = this.tp.filter(p => { p.x += p.vx; p.y += p.vy; p.life -= 0.065; return p.life > 0; });
+  }
+  draw() {
+    this.tp.forEach(p => {
+      ctx.save(); ctx.globalAlpha = p.life * 0.75; ctx.fillStyle = '#f97316';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.s, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+    });
+    if (this.inv > 0 && Math.floor(this.inv / 5) % 2 === 0) return;
+    ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(this.angle);
+    ctx.strokeStyle = '#a78bfa'; ctx.lineWidth = 1.5; ctx.shadowColor = '#a78bfa'; ctx.shadowBlur = 9;
+    ctx.beginPath(); ctx.moveTo(16, 0); ctx.lineTo(-10, 8); ctx.lineTo(-6, 0); ctx.lineTo(-10, -8); ctx.closePath();
+    ctx.stroke(); ctx.fillStyle = 'rgba(167,139,250,0.13)'; ctx.fill();
+    ctx.restore();
+  }
+}
+
+/* ── Formations ── */
+const FORMATIONS = [
+  { name: 'Line',    fn: (n, cx, cy) => Array.from({length:n}, (_, i) => ({ x: cx + (i - (n-1)/2) * 54, y: cy })) },
+  { name: 'V-shape', fn: (n, cx, cy) => Array.from({length:n}, (_, i) => ({ x: cx + (i - (n-1)/2) * 46, y: cy + Math.abs(i - (n-1)/2) * 32 })) },
+  { name: 'Diamond', fn: (n, cx, cy) => {
+      const pts = []; const rows = Math.ceil(Math.sqrt(n)); let idx = 0;
+      for (let r = 0; r < rows && idx < n; r++) {
+        const cnt = r === 0 ? 1 : r * 4; const step = 360 / cnt;
+        for (let j = 0; j < cnt && idx < n; j++, idx++) {
+          const a = (step * j - 90) * Math.PI / 180;
+          pts.push({ x: cx + Math.cos(a) * r * 38, y: cy + Math.sin(a) * r * 38 });
+        }
+      }
+      return pts;
+  }},
+  { name: 'Arrow', fn: (n, cx, cy) => {
+      const pts = []; const half = Math.floor(n / 2);
+      for (let i = 0; i <= half; i++) pts.push({ x: cx + i * 42, y: cy - i * 30 });
+      for (let i = 1; i < n - half; i++) pts.push({ x: cx + i * 42, y: cy + i * 30 });
+      return pts;
+  }},
+  { name: 'Grid', fn: (n, cx, cy) => {
+      const cols = Math.ceil(Math.sqrt(n));
+      return Array.from({length:n}, (_, i) => ({ x: cx + (i % cols - (cols-1)/2) * 50, y: cy + Math.floor(i / cols) * 46 - 23 }));
+  }},
+];
+
+/* ── Enemy ── */
+class Enemy {
+  constructor(x, y, type) {
+    this.x = x; this.y = y; this.type = type; this.alive = true;
+    this.r    = type === 'boss' ? 20 : type === 'heavy' ? 13 : 9;
+    this.hp   = type === 'boss' ? 5  : type === 'heavy' ? 3  : 1;
+    this.cd   = ri(60, 120);
+    this.angle = 0; this.t = 0;
+    this.vx = rnd(-0.4, 0.4); this.vy = rnd(-0.4, 0.4);
+    this.color     = type === 'boss' ? '#f87171' : type === 'heavy' ? '#fb923c' : '#fbbf24';
+    this.glowColor = type === 'boss' ? '#ef4444' : type === 'heavy' ? '#f97316' : '#f59e0b';
+    this.wobble = rnd(0, Math.PI * 2); this.wobbleSpeed = rnd(0.02, 0.05);
+    this.shootInterval = type === 'boss' ? 50 : type === 'heavy' ? 80 : 110;
+  }
+  update() {
+    this.t++; this.wobble += this.wobbleSpeed; this.angle += 0.02;
+    const dx = ship.x - this.x, dy = ship.y - this.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const chase = this.type === 'boss' ? 0.013 : this.type === 'heavy' ? 0.008 : 0.005;
+    this.vx += dx / d * chase;
+    this.vy += dy / d * chase;
+    const maxSpd = this.type === 'boss' ? 1.9 : this.type === 'heavy' ? 1.5 : 2.4;
+    const spd = Math.hypot(this.vx, this.vy);
+    if (spd > maxSpd) { this.vx = this.vx / spd * maxSpd; this.vy = this.vy / spd * maxSpd; }
+    this.x = wrapVal(this.x + this.vx, W);
+    this.y = wrapVal(this.y + this.vy, H);
+    if (--this.cd <= 0) { this.cd = this.shootInterval + ri(0, 30); this._shoot(); }
+  }
+  _shoot() {
+    const dx = ship.x - this.x, dy = ship.y - this.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const spd = this.type === 'boss' ? 5.5 : 3.8;
+    if (this.type === 'boss') {
+      for (let i = -1; i <= 1; i++) {
+        const a = Math.atan2(dy, dx) + i * 0.22;
+        eBullets.push({ x: this.x, y: this.y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, life: 100, t: this.type });
+      }
+    } else {
+      eBullets.push({ x: this.x, y: this.y, vx: dx / d * spd, vy: dy / d * spd, life: 100, t: this.type });
+    }
+  }
+  draw() {
+    ctx.save(); ctx.translate(this.x, this.y);
+    ctx.shadowColor = this.glowColor; ctx.shadowBlur = 10;
+    ctx.strokeStyle = this.color; ctx.lineWidth = 1.5;
+    if (this.type === 'boss') {
+      ctx.rotate(this.angle);
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = i / 6 * Math.PI * 2;
+        const r = i % 2 === 0 ? this.r : this.r * 0.55;
+        ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+      }
+      ctx.closePath(); ctx.stroke(); ctx.fillStyle = 'rgba(248,113,113,0.15)'; ctx.fill();
+      const bw = 42;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(-bw/2, -this.r - 11, bw, 4);
+      ctx.fillStyle = '#f87171'; ctx.fillRect(-bw/2, -this.r - 11, bw * (this.hp / 5), 4);
+    } else if (this.type === 'heavy') {
+      ctx.rotate(this.angle * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(0, -this.r); ctx.lineTo(this.r * 0.86, this.r * 0.5); ctx.lineTo(-this.r * 0.86, this.r * 0.5);
+      ctx.closePath(); ctx.stroke(); ctx.fillStyle = 'rgba(251,146,60,0.15)'; ctx.fill();
+      ctx.beginPath(); ctx.arc(0, 0, this.r * 0.45, 0, Math.PI * 2); ctx.stroke();
+      if (this.hp > 1) {
+        ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(-17, -this.r - 9, 34, 3);
+        ctx.fillStyle = '#fb923c'; ctx.fillRect(-17, -this.r - 9, 34 * (this.hp / 3), 3);
+      }
+    } else {
+      const wb = Math.sin(this.wobble) * 2;
+      ctx.beginPath();
+      ctx.moveTo(0, -this.r + wb); ctx.lineTo(this.r - wb, this.r * 0.5); ctx.lineTo(-(this.r - wb), this.r * 0.5);
+      ctx.closePath(); ctx.stroke(); ctx.fillStyle = 'rgba(251,191,36,0.12)'; ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+/* ── Waves ── */
+function spawnWave() {
+  G.wave++;
+  const wd = pickFormation();
+  wd.forEach(e => enemies.push(e));
+  showWaveBanner(wd[0] ? wd[0]._formName : 'Wave ' + G.wave);
+}
+
+function pickFormation() {
+  const hasBoss  = (G.wave % 4 === 0 && G.level >= 2) || (G.wave % 3 === 0 && G.level >= 4);
+  const hasHeavy = G.wave % 2 === 0 && G.level >= 1;
+  const type = hasBoss ? 'boss' : (hasHeavy && Math.random() < 0.5 ? 'heavy' : 'scout');
+  const baseCount = type === 'boss' ? 1 : type === 'heavy' ? ri(2, 3 + G.level) : ri(3, 5 + G.level);
+  const count = Math.min(baseCount, 12);
+  const fIdx = ri(0, FORMATIONS.length - 1);
+  const form = FORMATIONS[fIdx];
+  const side = ri(0, 3);
+  let cx, cy;
+  if      (side === 0) { cx = rnd(60, W - 60); cy = -40; }
+  else if (side === 1) { cx = W + 40;           cy = rnd(60, H - 60); }
+  else if (side === 2) { cx = rnd(60, W - 60); cy = H + 40; }
+  else                  { cx = -40;              cy = rnd(60, H - 60); }
+  const pts = form.fn(count, cx, cy);
+  return pts.map(p => {
+    const e = new Enemy(p.x, p.y, type);
+    e._formName = form.name + ' (' + type + ')';
+    return e;
+  });
+}
+
+function showWaveBanner(txt) { waveBanner = { text: txt, life: 180 }; }
+
+/* ── Asteroids ── */
+function spawnAsteroids() {
+  const count = 3 + G.level * 2;
+  for (let i = 0; i < count; i++) {
+    let x, y;
+    do { x = Math.random() * W; y = Math.random() * H; } while (dist({x, y}, ship) < 120);
+    const spd = 0.5 + G.level * 0.12;
+    asteroids.push(makeAsteroid(x, y, 3 + Math.random() * 0.5, rnd(-spd, spd), rnd(-spd, spd)));
+  }
+}
+
+function makeAsteroid(x, y, size, vx, vy) {
+  const r = size * 7;
+  const pts = Array.from({length: 10}, (_, i) => {
+    const a = i / 10 * Math.PI * 2;
+    const rad = r * (0.75 + Math.random() * 0.45);
+    return { x: Math.cos(a) * rad, y: Math.sin(a) * rad };
+  });
+  const cols = ['#7dd3fc', '#93c5fd', '#bfdbfe', '#a5f3fc', '#6ee7b7'];
+  return { x, y, size, vx, vy, r, pts, color: cols[ri(0, cols.length - 1)], rotation: 0, rotSpeed: rnd(-0.02, 0.02) };
+}
+
+/* ── Particles ── */
+function explode(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = rnd(1, 5);
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, color, life: 1, size: rnd(1, 3) });
+  }
+}
+
+/* ── Draw helpers ── */
+function drawBullet(b, isEnemy) {
+  ctx.save();
+  ctx.strokeStyle = isEnemy ? (b.t === 'boss' ? '#f87171' : '#fb923c') : '#f0abfc';
+  ctx.lineWidth   = isEnemy ? 2 : 1.8;
+  ctx.shadowColor = isEnemy ? '#ef4444' : '#e879f9'; ctx.shadowBlur = 5;
+  ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(b.x - b.vx * 0.7, b.y - b.vy * 0.7); ctx.stroke();
+  ctx.restore();
+}
+
+function drawCrosshair() {
+  const r = 11, gap = 5;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(167,139,250,0.85)'; ctx.lineWidth = 1.2;
+  ctx.shadowColor = '#a78bfa'; ctx.shadowBlur = 5;
+  ctx.beginPath();
+  ctx.moveTo(mx, my - r); ctx.lineTo(mx, my - gap);
+  ctx.moveTo(mx, my + gap); ctx.lineTo(mx, my + r);
+  ctx.moveTo(mx - r, my); ctx.lineTo(mx - gap, my);
+  ctx.moveTo(mx + gap, my); ctx.lineTo(mx + r, my);
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(mx, my, 3, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(167,139,250,0.4)'; ctx.stroke();
+  ctx.restore();
+}
+
+function mkStars() {
+  stars = Array.from({length: 110}, () => ({
+    x: Math.random() * W, y: Math.random() * H,
+    r: Math.random() * 1.3 + 0.2, a: Math.random()
+  }));
+}
+
+function drawStars() {
+  ctx.fillStyle = '#080816'; ctx.fillRect(0, 0, W, H);
+  stars.forEach(s => {
+    ctx.globalAlpha = 0.22 + s.a * 0.4; ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+/* ── Game loop ── */
+function initGame() {
+  resize();
+  G = { score:0, level:1, lives:5, running:false, wave:0, frame:0 };
+  ship = new Ship();
+  bullets = []; eBullets = []; asteroids = []; enemies = []; particles = [];
+  keys = {}; waveBanner = { text:'', life:0 };
+  mx = W / 2; my = H / 2;
+  mkStars(); spawnAsteroids(); spawnWave(); updHUD();
+}
+
+function loop() {
+  G.frame++;
+  drawStars();
+
+  if (G.running) {
+    ship.update();
+
+    bullets  = bullets.filter(b  => { b.x = wrapVal(b.x + b.vx, W); b.y = wrapVal(b.y + b.vy, H); b.life--; return b.life > 0; });
+    eBullets = eBullets.filter(b => { b.x += b.vx; b.y += b.vy; b.life--; return b.life > 0 && b.x > -20 && b.x < W+20 && b.y > -20 && b.y < H+20; });
+    asteroids.forEach(a => { a.x = wrapVal(a.x + a.vx, W); a.y = wrapVal(a.y + a.vy, H); a.rotation += a.rotSpeed; });
+    enemies.forEach(e => { if (e.alive) e.update(); });
+    particles = particles.filter(p => { p.x += p.vx; p.y += p.vy; p.vx *= 0.94; p.vy *= 0.94; p.life -= 0.024; return p.life > 0; });
+
+    /* bullet vs asteroids & enemies */
+    for (let bi = bullets.length - 1; bi >= 0; bi--) {
+      const b = bullets[bi];
+      let hit = false;
+      for (let ai = asteroids.length - 1; ai >= 0 && !hit; ai--) {
+        const a = asteroids[ai];
+        if (dist(b, a) < a.r) {
+          hit = true;
+          bullets.splice(bi, 1);
+          G.score += a.size < 2 ? 30 : a.size < 2.8 ? 20 : 10;
+          explode(a.x, a.y, a.color, 10);
+          if (a.size > 2) {
+            const sp = Math.hypot(a.vx, a.vy) + 0.4;
+            const ang = Math.atan2(a.vy, a.vx) + Math.PI / 2;
+            asteroids.push(makeAsteroid(a.x, a.y, a.size - 1.1,  Math.cos(ang) * sp,  Math.sin(ang) * sp));
+            asteroids.push(makeAsteroid(a.x, a.y, a.size - 1.1, -Math.cos(ang) * sp, -Math.sin(ang) * sp));
+          }
+          asteroids.splice(ai, 1);
+        }
+      }
+      for (let ei = enemies.length - 1; ei >= 0 && !hit; ei--) {
+        const e = enemies[ei];
+        if (e.alive && dist(b, e) < e.r) {
+          hit = true;
+          bullets.splice(bi, 1);
+          e.hp--;
+          if (e.hp <= 0) {
+            e.alive = false;
+            G.score += e.type === 'boss' ? 500 : e.type === 'heavy' ? 200 : 80;
+            explode(e.x, e.y, e.color, e.type === 'boss' ? 30 : 15);
+          } else {
+            explode(e.x, e.y, e.color, 5);
+          }
+        }
+      }
+    }
+
+    /* ship collision */
+    if (ship.inv === 0) {
+      [...asteroids, ...enemies.filter(e => e.alive)].forEach(o => {
+        if (dist(ship, o) < (o.r || 12) + ship.r - 4) hitPlayer();
+      });
+      for (let bi = eBullets.length - 1; bi >= 0; bi--) {
+        if (dist(ship, eBullets[bi]) < ship.r + 4) { eBullets.splice(bi, 1); hitPlayer(); }
+      }
+    }
+
+    /* level / wave progression */
+    const alive = enemies.filter(e => e.alive).length;
+    if (alive === 0 && asteroids.length === 0) {
+      G.level++;
+      spawnAsteroids();
+      spawnWave();
+      EL('lv').textContent = G.level;
+    } else if (alive === 0 && G.frame % 300 === 0 && enemies.length > 0) {
+      spawnWave();
+    }
+
+    updHUD();
+  }
+
+  /* draw everything */
+  particles.forEach(p => {
+    ctx.save(); ctx.globalAlpha = p.life; ctx.fillStyle = p.color;
+    ctx.shadowColor = p.color; ctx.shadowBlur = 3;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  });
+  asteroids.forEach(a => {
+    ctx.save(); ctx.translate(a.x, a.y); ctx.rotate(a.rotation);
+    ctx.strokeStyle = a.color; ctx.lineWidth = 1.2; ctx.shadowColor = a.color; ctx.shadowBlur = 3;
+    ctx.beginPath(); a.pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+    ctx.closePath(); ctx.stroke(); ctx.fillStyle = a.color + '18'; ctx.fill(); ctx.restore();
+  });
+  eBullets.forEach(b => drawBullet(b, true));
+  bullets.forEach(b  => drawBullet(b, false));
+  enemies.forEach(e  => { if (e.alive) e.draw(); });
+  if (G.running) ship.draw();
+
+  drawCrosshair();
+
+  if (waveBanner.life > 0) {
+    const alpha = Math.min(1, waveBanner.life / 50) * Math.min(1, waveBanner.life / 50);
+    ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = '#f87171';
+    ctx.font = '500 ' + Math.max(14, Math.round(H * 0.042)) + 'px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Wave ' + G.wave + ': ' + waveBanner.text, W / 2, H * 0.11);
+    ctx.restore();
+    waveBanner.life--;
+  }
+
+  animId = requestAnimationFrame(loop);
+}
+
+function hitPlayer() {
+  if (ship.inv > 0) return;
+  G.lives--; updHUD();
+  explode(ship.x, ship.y, '#a78bfa', 20);
+  ship.x = W / 2; ship.y = H / 2; ship.vx = 0; ship.vy = 0; ship.inv = 130;
+  if (G.lives <= 0) endGame();
+}
+
+function endGame() {
+  G.running = false;
+  if (animId) cancelAnimationFrame(animId);
+  const ol = EL('overlay');
+  ol.innerHTML = '<h2>GAME OVER</h2><div class="score-big">' + G.score + '</div><p>Level ' + G.level + ' &middot; Wave ' + G.wave + '</p><button id="sbtn">PLAY AGAIN</button>';
+  ol.style.display = 'flex';
+  ol.querySelector('#sbtn').addEventListener('click', startGame);
+}
+
+function startGame() {
+  if (animId) cancelAnimationFrame(animId);
+  initGame();
+  EL('overlay').style.display = 'none';
+  G.running = true;
+  loop();
+}
+
+/* ── Input ── */
+document.addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) {
+    e.preventDefault();
+  }
+});
+
+document.addEventListener('keyup', e => {
+  keys[e.key.toLowerCase()] = false;
+});
+
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  mx = (e.clientX - rect.left) * (W / rect.width);
+  my = (e.clientY - rect.top)  * (H / rect.height);
+});
+canvas.addEventListener('mousedown', e => { if (e.button === 0 && ship && G.running) ship.shooting = true; });
+canvas.addEventListener('mouseup',   () => { if (ship) ship.shooting = false; });
+canvas.addEventListener('mouseleave',() => { if (ship) ship.shooting = false; });
+
+/* ── Boot ── */
+EL('sbtn').addEventListener('click', startGame);
+resize();
+mkStars();
+loop();
+</script>
+</body>
+</html>
