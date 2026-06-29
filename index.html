@@ -501,14 +501,16 @@ function startGame() {
 
 /* ── Input ── */
 document.addEventListener('keydown', e => {
-  keys[e.key.toLowerCase()] = true;
+  const key = e.key.startsWith('Arrow') ? e.key : e.key.toLowerCase();
+  keys[key] = true;
   if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) {
     e.preventDefault();
   }
 });
 
 document.addEventListener('keyup', e => {
-  keys[e.key.toLowerCase()] = false;
+  const key = e.key.startsWith('Arrow') ? e.key : e.key.toLowerCase();
+  keys[key] = false;
 });
 
 canvas.addEventListener('mousemove', e => {
